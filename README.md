@@ -64,6 +64,10 @@ While training, the script will save check points to the *results* folder after 
 
 ## Visualization and Evaluation
 
+### ShiftDiF state-conditioned future paths
+
+The optional minimal market-state conditioning extension, its leakage and alignment contract, 10-day run commands, controls, and CPU smoke test are documented in [`Experiments/shift_dif_state_conditioning.md`](Experiments/shift_dif_state_conditioning.md). The example configuration is [`Config/shift_dif_state.yaml`](Config/shift_dif_state.yaml).
+
 After sampling, synthetic data and orginal data are stored in `.npy` file format under the *output* folder, which can be directly read to calculate quantitative metrics such as discriminative, predictive, correlational and context-FID score. You can also reproduce the visualization results using t-SNE or kernel plotting, and all of these evaluational codes can be found in the folder `./Utils`. Please refer to `.ipynb` tutorial files in this repo for more detailed implementations.
 
 **Note:** All the metrics can be found in the `./Experiments` folder. Additionally, by default, for datasets other than the Sine dataset (because it do not need normalization), their normalized forms are saved in `{...}_norm_truth.npy`. Therefore, when you run the Jupternotebook for dataset other than Sine, just uncomment and rewrite the corresponding code written at the beginning.

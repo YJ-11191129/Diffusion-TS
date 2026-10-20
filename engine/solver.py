@@ -31,6 +31,10 @@ class Trainer(object):
         self.save_cycle = config['solver']['save_cycle']
         self.dl = cycle(dataloader['dataloader'])
         self.dataloader = dataloader['dataloader']
+        dataset_states = getattr(dataloader.get('dataset'), 'sample_states', None)
+        if self.model.state_dim:
+            if dataset_states is None or dataset_states.shape[1] != self.model.state_dim:
+                raise ValueError('model.state_dim must match the configured training dataset state_root')
         self.step = 0
         self.milestone = 0
         self.args, self.config = args, config
@@ -105,8 +109,14 @@ class Trainer(object):
             while step < self.train_num_steps:
                 total_loss = 0.
                 for _ in range(self.gradient_accumulate_every):
-                    data = next(self.dl).to(device)
-                    loss = self.model(data, target=data)
+                    batch = next(self.dl)
+                    if isinstance(batch, (tuple, list)):
+                        data, market_state = batch
+                        market_state = market_state.to(device) if self.model.state_dim else None
+                    else:
+                        data, market_state = batch, None
+                    data = data.to(device)
+                    loss = self.model(data, target=data, market_state=market_state)
                     loss = loss / self.gradient_accumulate_every
                     loss.backward()
                     total_loss += loss.item()
@@ -159,6 +169,23 @@ class Trainer(object):
             self.logger.log_info('Sampling done, time: {:.2f}'.format(time.time() - tic))
         return samples
 
+    @torch.no_grad()
+    def sample_conditioned_paths(self, raw_dataloader):
+        """Generate full paths from each row's as-of market state, without a history mask."""
+        if not self.model.state_dim:
+            raise ValueError('sample_conditioned_paths requires a model configured with state_dim > 0')
+        samples = []
+        for batch in raw_dataloader:
+            if len(batch) != 3:
+                raise ValueError('conditional path batches must contain (target, mask, market_state)')
+            _, _, market_state = batch
+            market_state = market_state.to(self.device)
+            path = self.ema.ema_model.generate_mts(batch_size=market_state.shape[0],
+                                                   market_state=market_state)
+            samples.append(path.detach().cpu().numpy())
+        return np.concatenate(samples, axis=0) if samples else np.empty((0, self.model.seq_length,
+                                                                         self.model.feature_size))
+
     def restore(self, raw_dataloader, shape=None, coef=1e-1, stepsize=1e-1, sampling_steps=50):
         if self.logger is not None:
             tic = time.time()
@@ -170,14 +197,21 @@ class Trainer(object):
         reals = np.empty([0, shape[0], shape[1]])
         masks = np.empty([0, shape[0], shape[1]])
 
-        for idx, (x, t_m) in enumerate(raw_dataloader):
+        for idx, batch in enumerate(raw_dataloader):
+            if len(batch) == 3:
+                x, t_m, market_state = batch
+                market_state = market_state.to(self.device) if self.model.state_dim else None
+            else:
+                x, t_m = batch
+                market_state = None
             x, t_m = x.to(self.device), t_m.to(self.device)
             if sampling_steps == self.model.num_timesteps:
                 sample = self.ema.ema_model.sample_infill(shape=x.shape, target=x*t_m, partial_mask=t_m,
-                                                          model_kwargs=model_kwargs)
+                                                          model_kwargs=model_kwargs, market_state=market_state)
             else:
                 sample = self.ema.ema_model.fast_sample_infill(shape=x.shape, target=x*t_m, partial_mask=t_m, model_kwargs=model_kwargs,
-                                                               sampling_timesteps=sampling_steps)
+                                                               sampling_timesteps=sampling_steps,
+                                                               market_state=market_state)
 
             samples = np.row_stack([samples, sample.detach().cpu().numpy()])
             reals = np.row_stack([reals, x.detach().cpu().numpy()])

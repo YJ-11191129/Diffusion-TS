@@ -26,15 +26,25 @@ class CustomDataset(Dataset):
         missing_ratio=None,
         style='separate', 
         distribution='geometric', 
-        mean_mask_length=3
+        mean_mask_length=3,
+        state_root=None,
+        strict_path_split=False
     ):
         super(CustomDataset, self).__init__()
         assert period in ['train', 'test'], 'period must be train or test.'
         if period == 'train':
-            assert ~(predict_length is not None or missing_ratio is not None), ''
+            assert not (predict_length is not None or missing_ratio is not None), ''
         self.name, self.pred_len, self.missing_ratio = name, predict_length, missing_ratio
         self.style, self.distribution, self.mean_mask_length = style, distribution, mean_mask_length
         self.rawdata, self.scaler = self.read_data(data_root, self.name)
+        self.state_root = state_root
+        self.market_states = self._read_market_states(state_root) if state_root else None
+        self.strict_path_split = bool(strict_path_split or self.market_states is not None)
+        if self.strict_path_split:
+            # Fit all value transforms on the training era only. State rows must be
+            # causal filtered probabilities/features aligned one-for-one to raw rows.
+            split = int(len(self.rawdata) * proportion)
+            self.scaler = MinMaxScaler().fit(self.rawdata[:split])
         self.dir = os.path.join(output_dir, 'samples')
         os.makedirs(self.dir, exist_ok=True)
 
@@ -45,9 +55,15 @@ class CustomDataset(Dataset):
         self.auto_norm = neg_one_to_one
 
         self.data = self.__normalize(self.rawdata)
-        train, inference = self.__getsamples(self.data, proportion, seed)
-
-        self.samples = train if period == 'train' else inference
+        if not self.strict_path_split:
+            train, inference = self.__getsamples(self.data, proportion, seed)
+            self.samples = train if period == 'train' else inference
+            self.sample_states = None
+        else:
+            train, train_states, inference, inference_states = self._get_path_samples(self.data, proportion)
+            self.samples = train if period == 'train' else inference
+            self.sample_states = None if self.market_states is None else (
+                train_states if period == 'train' else inference_states)
         if period == 'test':
             if missing_ratio is not None:
                 self.masking = self.mask_data(seed)
@@ -58,6 +74,56 @@ class CustomDataset(Dataset):
             else:
                 raise NotImplementedError()
         self.sample_num = self.samples.shape[0]
+
+    @staticmethod
+    def _read_market_states(path):
+        """Load an as-of-time state series: integer labels or an N x K probability matrix."""
+        if path.endswith('.npy'):
+            states = np.load(path)
+        elif path.endswith('.csv'):
+            states = pd.read_csv(path).to_numpy()
+        else:
+            raise ValueError('state_root must point to an aligned .npy or numeric .csv file')
+        states = np.asarray(states)
+        if states.ndim == 1:
+            numeric = states.astype(np.float32)
+            if np.allclose(numeric, np.round(numeric)) and np.all(numeric >= 0):
+                labels = numeric.astype(int)
+                states = np.eye(int(labels.max()) + 1, dtype=np.float32)[labels]
+            else:
+                states = numeric[:, None]
+        elif states.ndim == 2:
+            states = states.astype(np.float32)
+        else:
+            raise ValueError('states must be a label vector or an N x K matrix')
+        if not np.isfinite(states).all():
+            raise ValueError('state series contains missing or non-finite values')
+        if states.shape[1] > 1 and np.all(states >= 0) and np.allclose(states.sum(axis=1), 1., atol=1e-4):
+            # Preserve filtered HMM posteriors as supplied; normalize small drift only.
+            states = states / np.maximum(states.sum(axis=1, keepdims=True), 1e-12)
+        return states.astype(np.float32)
+
+    def _get_path_samples(self, data, proportion):
+        if self.market_states is not None and len(self.market_states) != len(data):
+            raise ValueError('state_root must have exactly one row per raw data row')
+        n = len(data)
+        cut = int(n * proportion)
+        # A path beginning at s is conditioned on information available at s-1.
+        # Train targets end no later than the split; test targets start at the split.
+        train_starts = np.arange(1, max(1, cut - self.window + 1))
+        test_starts = np.arange(max(1, cut), max(max(1, cut), n - self.window + 1))
+
+        def make(starts):
+            if len(starts) == 0:
+                empty_paths = np.empty((0, self.window, self.var_num), dtype=np.float32)
+                empty_states = None if self.market_states is None else np.empty(
+                    (0, self.market_states.shape[1]), dtype=np.float32)
+                return empty_paths, empty_states
+            paths = np.stack([data[s:s + self.window] for s in starts]).astype(np.float32)
+            states = None if self.market_states is None else self.market_states[starts - 1]
+            return paths, states
+
+        return (*make(train_starts), *make(test_starts))
 
     def __getsamples(self, data, proportion, seed):
         x = np.zeros((self.sample_num_total, self.window, self.var_num))
@@ -161,8 +227,12 @@ class CustomDataset(Dataset):
         if self.period == 'test':
             x = self.samples[ind, :, :]  # (seq_length, feat_dim) array
             m = self.masking[ind, :, :]  # (seq_length, feat_dim) boolean array
+            if self.sample_states is not None:
+                return torch.from_numpy(x).float(), torch.from_numpy(m), torch.from_numpy(self.sample_states[ind]).float()
             return torch.from_numpy(x).float(), torch.from_numpy(m)
         x = self.samples[ind, :, :]  # (seq_length, feat_dim) array
+        if self.sample_states is not None:
+            return torch.from_numpy(x).float(), torch.from_numpy(self.sample_states[ind]).float()
         return torch.from_numpy(x).float()
 
     def __len__(self):
