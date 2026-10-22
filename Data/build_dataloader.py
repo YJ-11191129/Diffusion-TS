@@ -8,12 +8,27 @@ def build_dataloader(config, args=None):
     config['dataloader']['train_dataset']['params']['output_dir'] = args.save_dir
     dataset = instantiate_from_config(config['dataloader']['train_dataset'])
 
+    sampler = None
+    state_weights = config['dataloader']['train_dataset'].get('state_sampling_weights')
+    if state_weights is not None:
+        if getattr(dataset, 'sample_states', None) is None:
+            raise ValueError('state_sampling_weights requires train_dataset.params.state_root')
+        state_weights = torch.as_tensor(state_weights, dtype=torch.float32)
+        if state_weights.numel() != dataset.sample_states.shape[1]:
+            raise ValueError('state_sampling_weights must have one weight per state dimension')
+        if not torch.isfinite(state_weights).all() or torch.any(state_weights < 0) or state_weights.sum() <= 0:
+            raise ValueError('state_sampling_weights must be finite, non-negative, and not all zero')
+        weights = torch.as_tensor(dataset.sample_states, dtype=torch.float32) @ state_weights
+        if torch.any(weights < 0) or weights.sum() <= 0:
+            raise ValueError('state_sampling_weights produce invalid sample weights')
+        sampler = torch.utils.data.WeightedRandomSampler(weights, len(weights), replacement=True)
+
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=batch_size,
-                                             shuffle=jud,
+                                             shuffle=jud if sampler is None else False,
                                              num_workers=0,
                                              pin_memory=True,
-                                             sampler=None,
+                                             sampler=sampler,
                                              drop_last=jud)
 
     dataload_info = {

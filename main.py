@@ -77,13 +77,20 @@ def main():
     elif args.sample == 1 and args.mode in ['infill', 'predict']:
         trainer.load(args.milestone)
         dataloader, dataset = test_dataloader_info['dataloader'], test_dataloader_info['dataset']
-        coef = config['dataloader']['test_dataset']['coefficient']
-        stepsize = config['dataloader']['test_dataset']['step_size']
-        sampling_steps = config['dataloader']['test_dataset']['sampling_steps']
-        samples, *_ = trainer.restore(dataloader, [dataset.window, dataset.var_num], coef, stepsize, sampling_steps)
+        if args.mode == 'predict' and model.state_dim:
+            if args.pred_len != dataset.window:
+                raise ValueError('state-conditioned full-path sampling requires --pred_len to equal test_dataset.window')
+            samples = trainer.sample_conditioned_paths(dataloader)
+        else:
+            coef = config['dataloader']['test_dataset']['coefficient']
+            stepsize = config['dataloader']['test_dataset']['step_size']
+            sampling_steps = config['dataloader']['test_dataset']['sampling_steps']
+            samples, *_ = trainer.restore(dataloader, [dataset.window, dataset.var_num], coef, stepsize, sampling_steps)
         if dataset.auto_norm:
             samples = unnormalize_to_zero_to_one(samples)
-            # samples = dataset.scaler.inverse_transform(samples.reshape(-1, samples.shape[-1])).reshape(samples.shape)
+        if args.mode == 'predict':
+            samples = dataset.scaler.inverse_transform(
+                samples.reshape(-1, samples.shape[-1])).reshape(samples.shape)
         np.save(os.path.join(args.save_dir, f'ddpm_{args.mode}_{args.name}.npy'), samples)
     else:
         trainer.load(args.milestone)

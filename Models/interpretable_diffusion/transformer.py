@@ -323,7 +323,7 @@ class DecoderBlock(nn.Module):
     def forward(self, x, encoder_output, timestep, mask=None, label_emb=None):
         a, att = self.attn1(self.ln1(x, timestep, label_emb), mask=mask)
         x = x + a
-        a, att = self.attn2(self.ln1_1(x, timestep), encoder_output, mask=mask)
+        a, att = self.attn2(self.ln1_1(x, timestep, label_emb), encoder_output, mask=mask)
         x = x + a
         x1, x2 = self.proj(x).chunk(2, dim=1)
         trend, season = self.trend(x1), self.seasonal(x2)
@@ -393,9 +393,12 @@ class Transformer(nn.Module):
         block_activate='GELU',
         max_len=2048,
         conv_params=None,
+        state_dim=0,
         **kwargs
     ):
         super().__init__()
+        self.state_dim = int(state_dim)
+        self.state_embed = nn.Linear(self.state_dim, n_embd) if self.state_dim > 0 else None
         self.emb = Conv_MLP(n_feat, n_embd, resid_pdrop=resid_pdrop)
         self.inverse = Conv_MLP(n_embd, n_feat, resid_pdrop=resid_pdrop)
 
@@ -419,13 +422,24 @@ class Transformer(nn.Module):
                                block_activate, condition_dim=n_embd)
         self.pos_dec = LearnablePositionalEncoding(n_embd, dropout=resid_pdrop, max_len=max_len)
 
-    def forward(self, input, t, padding_masks=None, return_res=False):
+    def forward(self, input, t, padding_masks=None, return_res=False, market_state=None):
         emb = self.emb(input)
         inp_enc = self.pos_enc(emb)
-        enc_cond = self.encoder(inp_enc, t, padding_masks=padding_masks)
+        if self.state_dim:
+            if market_state is None:
+                raise ValueError('market_state is required when state_dim > 0')
+            if market_state.ndim != 2 or market_state.shape != (input.shape[0], self.state_dim):
+                raise ValueError(f'market_state must have shape (batch, {self.state_dim})')
+            state_emb = self.state_embed(market_state.to(device=input.device, dtype=input.dtype))
+        else:
+            if market_state is not None:
+                raise ValueError('market_state supplied to a model configured without state_dim')
+            state_emb = None
+        enc_cond = self.encoder(inp_enc, t, padding_masks=padding_masks, label_emb=state_emb)
 
         inp_dec = self.pos_dec(emb)
-        output, mean, trend, season = self.decoder(inp_dec, t, enc_cond, padding_masks=padding_masks)
+        output, mean, trend, season = self.decoder(inp_dec, t, enc_cond, padding_masks=padding_masks,
+                                                  label_emb=state_emb)
 
         res = self.inverse(output)
         res_m = torch.mean(res, dim=1, keepdim=True)
