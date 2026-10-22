@@ -48,6 +48,7 @@ dataloader:
       proportion: 0.9  # Must match the held-out test cutoff below.
       data_root: ./Data/datasets/asset_log_returns.csv
       state_root: ./Data/datasets/market_state_filtered.npy
+      state_metadata_required: true  # generated JSON validates split, hashes and calibration exclusion
       window: 10  # Predict exactly the next 10 trading days.
       strict_path_split: true
       save2npy: True
@@ -62,6 +63,7 @@ dataloader:
       proportion: 0.9  # rate
       data_root: ./Data/datasets/asset_log_returns.csv
       state_root: ./Data/datasets/market_state_filtered.npy
+      state_metadata_required: true  # generated JSON validates split, hashes and calibration exclusion
       window: 10
       strict_path_split: true
       save2npy: True

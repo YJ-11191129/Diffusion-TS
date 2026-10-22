@@ -1,4 +1,7 @@
 import os
+import json
+import hashlib
+from pathlib import Path
 import torch
 import numpy as np
 import pandas as pd
@@ -28,7 +31,9 @@ class CustomDataset(Dataset):
         distribution='geometric', 
         mean_mask_length=3,
         state_root=None,
-        strict_path_split=False
+        strict_path_split=False,
+        state_metadata_required=False,
+        path_start=1
     ):
         super(CustomDataset, self).__init__()
         assert period in ['train', 'test'], 'period must be train or test.'
@@ -39,6 +44,23 @@ class CustomDataset(Dataset):
         self.rawdata, self.scaler = self.read_data(data_root, self.name)
         self.state_root = state_root
         self.market_states = self._read_market_states(state_root) if state_root else None
+        self.path_start = max(1, int(path_start))
+        if state_root:
+            manifest = Path(state_root).with_suffix('.json')
+            if state_metadata_required and not manifest.exists():
+                raise ValueError('causal state metadata is required')
+            if manifest.exists():
+                meta = json.loads(manifest.read_text())
+                cut = int(len(self.rawdata) * proportion)
+                if (meta['rows'] != len(self.rawdata) or meta['split_row'] != cut
+                        or meta['state_dim'] != self.market_states.shape[1]
+                        or not 0 < meta['fit_rows'] < cut
+                        or meta['first_target_row'] != meta['fit_rows']):
+                    raise ValueError('state metadata split, dimensions or calibration boundary mismatch')
+                for file, key in ((data_root, 'returns_sha256'), (state_root, 'states_sha256')):
+                    if hashlib.sha256(Path(file).read_bytes()).hexdigest() != meta[key]:
+                        raise ValueError('state metadata hash mismatch: date/row alignment is unverified')
+                self.path_start = max(self.path_start, meta['first_target_row'])
         self.strict_path_split = bool(strict_path_split or self.market_states is not None)
         if self.strict_path_split:
             # Fit all value transforms on the training era only. State rows must be
@@ -110,7 +132,7 @@ class CustomDataset(Dataset):
         cut = int(n * proportion)
         # A path beginning at s is conditioned on information available at s-1.
         # Train targets end no later than the split; test targets start at the split.
-        train_starts = np.arange(1, max(1, cut - self.window + 1))
+        train_starts = np.arange(self.path_start, max(self.path_start, cut - self.window + 1))
         test_starts = np.arange(max(1, cut), max(max(1, cut), n - self.window + 1))
 
         def make(starts):
